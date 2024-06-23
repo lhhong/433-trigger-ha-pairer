@@ -1,0 +1,33 @@
+.btn {
+  @apply py-1 px-2 rounded;
+}
+.btn-green {
+  @apply bg-green-700 text-white;
+}
+.btn-green:hover {
+  @apply bg-green-900;
+}
+.btn-red {
+  @apply bg-red-700 text-white;
+}
+.btn-red:hover {
+  @apply bg-red-900;
+}
+
+.pair-instruction {
+  @apply invisible;
+}
+.htmx-request .pair-instruction {
+  @apply visible;
+}
+.htmx-request.pair-instruction {
+  @apply visible;
+}
+
+.form-input {
+  @apply w-36 px-2 border border-black rounded;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

@@ -1,0 +1,106 @@
+package templates
+
+import (
+  "fmt"
+	"github.com/lhhong/ha433pairer/server"
+)
+
+templ RootDoc(devices []server.RegisteredDevice) {
+	<!DOCTYPE html>
+	<html>
+		<head>
+			<script src="https://unpkg.com/htmx.org@2.0.0"></script>
+      <link href="./css/output.css" rel="stylesheet" />
+		</head>
+		<body>
+      <div class="text-lg">
+        <div class="m-10">
+          <div class="mb-2">
+            <h2 class="mb-3 text-2xl">Registered devices</h2>
+            <hr />
+            <div id="device-list">
+              for _, device := range devices {
+                @DeviceEntry(device)
+              }
+            </div>
+          </div>
+          <div class="flex flex-row justify-center">
+            <button hx-get="/add-new-device" hx-target="#dialog-holder" hx-swap="outerHTML" hx-trigger="click" class="btn btn-green w-36">New device</button>
+          </div>
+        </div>
+        <div hx-get="/empty-dialog" hx-swap="outerHTML" hx-trigger="closeDialog from:body" hx-target="#dialog-holder" class="invisible"></div>
+        @EmptyDialog()
+      </div>
+		</body>
+	</html>
+}
+
+templ DeviceEntry(device server.RegisteredDevice) {
+  <div class="mt-1 mb-3" id={ device.Id }>
+    <div class="flex flex-row border-b border-b-black bg-slate-300 p-2">
+      <button hx-get="/add-new-trigger" hx-vals={ fmt.Sprintf(`{"deviceId": "%s"}`, device.Id) } hx-target="#dialog-holder" hx-swap="outerHTML" hx-trigger="click" class="btn btn-green">Add trigger</button>
+      <div class="ml-5 self-center">{ device.Name }</div>
+    </div>
+    <div id={ triggerListId(device.Id) }>
+      for _, trigger := range device.Triggers {
+        @TriggerEntry(trigger)
+      }
+    </div>
+  </div>
+}
+
+templ TriggerEntry(trigger server.RegisteredTrigger) {
+  <div class="p-2 pl-20 border-b border-b-black bg-slate-200" id={ trigger.Id }>{ trigger.Name }</div>
+}
+
+func triggerListId(deviceId string) string {
+  return fmt.Sprintf("trigger-list-%s", deviceId)
+}
+
+templ EmptyDialog() {
+  <div id="dialog-holder" class="invisible"></div>
+}
+
+templ AddDeviceDialog() {
+  @dialogWrapper() {
+    <form hx-post="/create-device" hx-target="#device-list" hx-swap="beforeend" class="flex flex-col justify-center items-center">
+      <div class="flex flex-row justify-between m-4 w-64">
+        <div>Name: </div>
+        <input name="name" type="text" class="form-input" />
+      </div>
+      @dialogButtonGroup()
+    </form>
+  }
+}
+
+templ AddTriggerDialog(deviceId string) {
+  @dialogWrapper() {
+    <form hx-post="/create-trigger" hx-target={ fmt.Sprintf("#%s", triggerListId(deviceId)) } hx-swap="beforeend" class="flex flex-col justify-center items-center" hx-indicator="#pair-instruction">
+      <input name="deviceId" type="text" class="invisible" value={ deviceId } />
+      <div class="flex flex-row justify-between m-4 w-64">
+        <div>Name: </div>
+        <input name="name" type="text" class="form-input" />
+      </div>
+      @dialogButtonGroup()
+      <div id="pair-instruction" class="pair-instruction flex flex-row m-2">
+        <svg class="spinner animate-spin mx-3" id="spinner" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
+        <div>Click the trigger 3 times in 1 second interval to pair. DON'T CLICK CREATE AGAIN!</div>
+      </div>
+    </form>
+  }
+}
+
+templ dialogWrapper() {
+  <div id="dialog-holder" class="fixed top-0 w-full h-full bg-black bg-opacity-25 flex flex-col">
+    <div class="bg-slate-200 mt-24 p-10 self-center w-1/2 border border-black rounded shadow">
+      { children... }
+    </div>
+  </div>
+}
+
+templ dialogButtonGroup() {
+  <div class="flex flex-row self-center justify-center gap-6">
+    <button class="btn btn-green">Create</button>
+    <div hx-get="/empty-dialog" hx-swap="outerHTML" hx-trigger="click" hx-target="#dialog-holder" class="btn btn-red hover:cursor-pointer">Cancel</div>
+  </div>
+}
