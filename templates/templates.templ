@@ -2,10 +2,10 @@ package templates
 
 import (
   "fmt"
-	"github.com/lhhong/ha433pairer/server"
+	"github.com/lhhong/trigger2mqtt/server"
 )
 
-templ RootDoc(devices []server.RegisteredDevice) {
+templ RootDoc(devices []server.Device) {
 	<!DOCTYPE html>
 	<html>
 		<head>
@@ -35,7 +35,7 @@ templ RootDoc(devices []server.RegisteredDevice) {
 	</html>
 }
 
-templ DeviceEntry(device server.RegisteredDevice) {
+templ DeviceEntry(device server.Device) {
   <div class="mt-1 mb-3" id={ device.Id }>
     <div class="flex flex-row border-b border-b-black bg-slate-300 p-2">
       <button hx-get="/add-new-trigger" hx-vals={ fmt.Sprintf(`{"deviceId": "%s"}`, device.Id) } hx-target="#dialog-holder" hx-swap="outerHTML" hx-trigger="click" class="btn btn-green">Add trigger</button>
@@ -49,8 +49,8 @@ templ DeviceEntry(device server.RegisteredDevice) {
   </div>
 }
 
-templ TriggerEntry(trigger server.RegisteredTrigger) {
-  <div class="p-2 pl-20 border-b border-b-black bg-slate-200" id={ trigger.Id }>{ trigger.Name }</div>
+templ TriggerEntry(trigger server.Trigger) {
+  <div class="p-2 pl-20 border-b border-b-black bg-slate-200" id={ trigger.Id }>{ trigger.SubType }</div>
 }
 
 func triggerListId(deviceId string) string {
@@ -78,8 +78,8 @@ templ AddTriggerDialog(deviceId string) {
     <form hx-post="/create-trigger" hx-target={ fmt.Sprintf("#%s", triggerListId(deviceId)) } hx-swap="beforeend" class="flex flex-col justify-center items-center" hx-indicator="#pair-instruction">
       <input name="deviceId" type="text" class="invisible" value={ deviceId } />
       <div class="flex flex-row justify-between m-4 w-64">
-        <div>Name: </div>
-        <input name="name" type="text" class="form-input" />
+        <div>SubType: </div>
+        <input name="subType" type="text" class="form-input" />
       </div>
       @dialogButtonGroup()
       <div id="pair-instruction" class="pair-instruction flex flex-row m-2">

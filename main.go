@@ -4,12 +4,11 @@ import (
 	_ "embed"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/a-h/templ"
 	"github.com/fsnotify/fsnotify"
-	"github.com/lhhong/ha433pairer/server"
-	"github.com/lhhong/ha433pairer/templates"
+	"github.com/lhhong/trigger2mqtt/server"
+	"github.com/lhhong/trigger2mqtt/templates"
 )
 
 //go:embed css/output.css
@@ -23,6 +22,11 @@ func main() {
 	defer watcher.Close()
 
 	config := server.InitConfig(watcher)
+	pairing := server.InitPairing()
+	client := server.InitMqtt(config, pairing)
+	defer client.Disconnect(1000)
+
+	server.PublishAllDiscovery(config, client)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "text/html")
@@ -49,12 +53,12 @@ func main() {
 	})
 	http.HandleFunc("/create-trigger", func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()
-		newTrigger, err := server.AddTrigger(config, r.Form.Get("deviceId"), r.Form.Get("name"))
+		newTrigger, err := server.StartPairing(r.Form.Get("deviceId"), r.Form.Get("subType"), config, pairing)
 		if err != nil {
 			log.Println(err)
 			w.WriteHeader(500)
 		} else {
-			time.Sleep(3 * time.Second)
+			server.PublishAllDiscovery(config, client)
 			w.Header().Add("Content-Type", "text/html")
 			w.Header().Add("HX-Trigger-After-Swap", "closeDialog")
 			templates.TriggerEntry(*newTrigger).Render(r.Context(), w)
