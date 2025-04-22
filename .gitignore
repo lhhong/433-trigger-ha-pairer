@@ -2,3 +2,4 @@
 /templates/*_templ.*
 /node_modules
 /config-dev
+trigger2mqtt

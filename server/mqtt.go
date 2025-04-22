@@ -3,10 +3,13 @@ package server
 import (
 	"encoding/json"
 	"log"
+	"math/rand"
 	"strings"
+	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/puzpuzpuz/xsync"
 )
 
 type SourceTriggerMessage struct {
@@ -14,7 +17,30 @@ type SourceTriggerMessage struct {
 	Model string          `json:"model"`
 }
 
+type triggerLongHoldState struct {
+	triggerHash    int
+	firstTriggered time.Time
+	sentLongPress  bool
+	count          uint
+}
+
+type longHoldStates struct {
+	triggers map[SourceTriggerId]triggerLongHoldState
+	locks    *xsync.MapOf[SourceTriggerId, *sync.Mutex]
+}
+
+var longHold longHoldStates = longHoldStates{
+	triggers: make(map[SourceTriggerId]triggerLongHoldState),
+	locks:    xsync.NewTypedMapOf[SourceTriggerId, *sync.Mutex](func (id SourceTriggerId) uint64 {
+		return xsync.StrHash64(string(id))
+	}),
+}
+
 const rootTopic string = "trigger2mqtt"
+
+var buttonShortPress = "button_short_press"
+var buttonLongPress = "button_long_press"
+var buttonLongRelease = "button_long_release"
 
 func (devConf *DeviceConfig) toMqttMessages(envVars EnvVars) mqttMessages {
 	triggerMap := make(map[SourceTriggerId]triggerMessages)
@@ -24,24 +50,49 @@ func (devConf *DeviceConfig) toMqttMessages(envVars EnvVars) mqttMessages {
 			Name:        device.Name,
 			Model:       device.Model,
 		}
+		holdSupported := device.Model == "Brandless remote"
 		for _, trigger := range device.Triggers {
 			if _, seen := triggerMap[trigger.SourceId]; seen {
 				log.Println("Found duplicated trigger sourceId. Only using the first defined value.")
 				continue
 			}
-
-			triggerDiscoveryMessage := DiscoveryMessage{
-				AutomationType: "trigger",
-				Type:           "button_short_press",
-				SubType:        trigger.SubType,
-				Topic:          rootTopic + "/" + trigger.Id,
-				Device:         deviceDiscoveryMessage,
+			var triggerTopic = rootTopic + "/" + trigger.Id
+			var triggerDiscoveryMessages = make(map[discoveryTopic]DiscoveryMessage)
+			triggerDiscoveryMessages[envVars.HaDiscoveryPrefix+"/device_automation/rtl_433/"+trigger.Id+"_"+buttonShortPress+"/config"] =
+				DiscoveryMessage{
+					AutomationType: "trigger",
+					Type:           buttonShortPress,
+					Payload:        &buttonShortPress,
+					SubType:        trigger.SubType,
+					Topic:          triggerTopic,
+					Device:         deviceDiscoveryMessage,
+				}
+			if holdSupported {
+				triggerDiscoveryMessages[envVars.HaDiscoveryPrefix+"/device_automation/rtl_433/"+trigger.Id+"_"+buttonLongPress+"/config"] =
+					DiscoveryMessage{
+						AutomationType: "trigger",
+						Type:           buttonLongPress,
+						Payload:        &buttonLongPress,
+						SubType:        trigger.SubType,
+						Topic:          triggerTopic,
+						Device:         deviceDiscoveryMessage,
+					}
+				triggerDiscoveryMessages[envVars.HaDiscoveryPrefix+"/device_automation/rtl_433/"+trigger.Id+"_"+buttonLongRelease+"/config"] =
+					DiscoveryMessage{
+						AutomationType: "trigger",
+						Type:           buttonLongRelease,
+						Payload:        &buttonLongRelease,
+						SubType:        trigger.SubType,
+						Topic:          triggerTopic,
+						Device:         deviceDiscoveryMessage,
+					}
 			}
 
 			triggerMap[trigger.SourceId] = triggerMessages{
-				triggerId:        trigger.Id,
-				discoveryTopic:   envVars.HaDiscoveryPrefix + "/device_automation/" + trigger.Id + "/config",
-				discoveryMessage: triggerDiscoveryMessage,
+				triggerId:         trigger.Id,
+				triggerTopic:      triggerTopic,
+				holdSupported:     holdSupported,
+				discoveryMessages: triggerDiscoveryMessages,
 			}
 		}
 	}
@@ -81,15 +132,37 @@ func rtl433EventHandler(mqttRoutes *mqttMessages, pairing PairingState) mqtt.Mes
 
 		discovery, ok := mqttRoutes.triggers[sourceMessage.Id]
 		if ok {
-			token := client.Publish(discovery.discoveryMessage.Topic, 1, false, "1")
-			if !token.WaitTimeout(1*time.Second) || token.Error() != nil {
-				log.Println("Error publishing trigger activation: ", discovery.triggerId)
+			if !discovery.holdSupported {
+				publishMessage(client, discovery, buttonShortPress)
 			} else {
-				log.Println("Republished trigger activation to HA,\n  device: ",
-					discovery.discoveryMessage.Device.Name, "\n  trigger: ", discovery.discoveryMessage.SubType)
+				lock, _ := longHold.locks.LoadOrStore(sourceMessage.Id, &sync.Mutex{})
+				lock.Lock()
+				state, ok := longHold.triggers[sourceMessage.Id]
+				var newTriggerState triggerLongHoldState
+				if !ok {
+					newTriggerState = triggerLongHoldState{
+						triggerHash:    rand.Int(),
+						firstTriggered: time.Now(),
+						count:          1,
+					}
+				} else {
+					shouldSendLongPress := !state.sentLongPress && state.firstTriggered.Add(300*time.Millisecond).Before(time.Now())
+					if shouldSendLongPress {
+						log.Println("Starting long press")
+						publishMessage(client, discovery, buttonLongPress)
+					}
+					newTriggerState = triggerLongHoldState{
+						triggerHash:    rand.Int(),
+						firstTriggered: state.firstTriggered,
+						count:          state.count + 1,
+						sentLongPress:  state.sentLongPress || shouldSendLongPress,
+					}
+				}
+				longHold.triggers[sourceMessage.Id] = newTriggerState
+				lock.Unlock()
+				go waitLongHold(client, sourceMessage.Id, discovery, newTriggerState.triggerHash)
 			}
 		} else {
-
 			pairingChannel := *pairing.Channel
 			if pairingChannel != nil && !pairing.closing.Load() {
 				// Pairing in progress, if the trigger don't match existing stuff, send it to the pairing channel
@@ -100,7 +173,34 @@ func rtl433EventHandler(mqttRoutes *mqttMessages, pairing PairingState) mqtt.Mes
 				log.Println("Received unmatched device ID: ", sourceMessage.Id)
 			}
 		}
+	}
+}
 
+func waitLongHold(client mqtt.Client, sourceId SourceTriggerId, discovery triggerMessages, triggerHash int) {
+	time.Sleep(150 * time.Millisecond)
+	lock, _ := longHold.locks.Load(sourceId)
+	lock.Lock()
+	defer lock.Unlock()
+	triggerState, ok := longHold.triggers[sourceId]
+	if ok && triggerState.triggerHash == triggerHash {
+		log.Println("No trigger response after 150 ms")
+		if triggerState.sentLongPress {
+			publishMessage(client, discovery, buttonLongRelease)
+		} else if triggerState.count > 1 {
+			publishMessage(client, discovery, buttonShortPress)
+		} else {
+			log.Println("Only received 1 signal for trigger, ignoring")
+		}
+		delete(longHold.triggers, sourceId)
+	}
+}
+
+func publishMessage(client mqtt.Client, triggerMessage triggerMessages, actionType string) {
+	token := client.Publish(triggerMessage.triggerTopic, 1, false, actionType)
+	if !token.WaitTimeout(1*time.Second) || token.Error() != nil {
+		log.Println("Error publishing trigger activation: ", triggerMessage.triggerId)
+	} else {
+		log.Println("Republished trigger activation to HA: ", triggerMessage.triggerId)
 	}
 }
 
@@ -118,15 +218,17 @@ func PublishAllDiscovery(config ConfigState, client mqtt.Client) {
 
 	tokens := make([]inflightPublish, 0)
 	for _, triggerMsg := range config.mqttMessages.triggers {
-		log.Println("Publishing discovery: ", triggerMsg.discoveryTopic)
-		payload, err := json.Marshal(triggerMsg.discoveryMessage)
-		if err != nil {
-			log.Println("Failed to serialize json: ", err)
+		for topic, discovery := range triggerMsg.discoveryMessages {
+			log.Println("Publishing discovery: ", topic)
+			payload, err := json.Marshal(discovery)
+			if err != nil {
+				log.Println("Failed to serialize json: ", err)
+			}
+			tokens = append(tokens, inflightPublish{
+				token:     client.Publish(topic, 1, true, payload),
+				triggerId: triggerMsg.triggerId,
+			})
 		}
-		tokens = append(tokens, inflightPublish{
-			token:     client.Publish(triggerMsg.discoveryTopic, 1, true, payload),
-			triggerId: triggerMsg.triggerId,
-		})
 	}
 
 	for _, token := range tokens {
